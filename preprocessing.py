@@ -1,8 +1,10 @@
-import xml.etree.cElementTree as ET
+import json
+import spacy
+import regex as re
 import numpy as np
 import unicodedata
-import json
-import regex as re
+import xml.etree.cElementTree as ET
+from spacy import displacy
 
 POLARITY_MAP = {"negative": 0, "positive": 1, "neutral": 2, "conflict": 3}
 BIO_MAP = {"O": 0, "B": 1, "I": 2}
@@ -54,7 +56,7 @@ def parse_laptops_xml(xml_path):
     return dataset
 
 
-def preprocess_with_terms_position(text, terms_position, punctuation=False, lowercase=False):
+def preprocess_with_terms_position(text, terms_position, punctuation=False, lowercase=False, keep_quote=True):
     """
     Preprocesses text to normalize it for tokenization while keeping labels positions.
     """
@@ -64,9 +66,13 @@ def preprocess_with_terms_position(text, terms_position, punctuation=False, lowe
         last_end = 0
         for start, end in terms_position:
             # Preprocess text
-            processed_text = preprocess_data(text[last_end:start], punctuation=punctuation, lowercase=lowercase)
+            processed_text = preprocess_data(
+                text[last_end:start], punctuation=punctuation, lowercase=lowercase, keep_quote=keep_quote
+            )
             # Preprocess labels
-            processed_term = preprocess_data(text[start:end], punctuation=punctuation, lowercase=lowercase)
+            processed_term = preprocess_data(
+                text[start:end], punctuation=punctuation, lowercase=lowercase, keep_quote=keep_quote
+            )
             # Keeps track of already processed text
             last_end = end
             final_text += processed_text + " "
@@ -76,15 +82,17 @@ def preprocess_with_terms_position(text, terms_position, punctuation=False, lowe
             # Be sure to have label at the correct position
             assert processed_term == final_text[final_positions[-1][0] : final_positions[-1][1]]
         # Preprocess text after last label
-        processed_text = preprocess_data(text[last_end:], punctuation=punctuation, lowercase=lowercase)
+        processed_text = preprocess_data(
+            text[last_end:], punctuation=punctuation, lowercase=lowercase, keep_quote=keep_quote
+        )
 
         final_text += processed_text
         return final_text, final_positions
     else:
-        return preprocess_data(text, punctuation=punctuation, lowercase=lowercase), []
+        return preprocess_data(text, punctuation=punctuation, lowercase=lowercase, keep_quote=keep_quote), []
 
 
-def preprocess_data(text, punctuation=False, lowercase=False):
+def preprocess_data(text, punctuation=False, lowercase=False, keep_quote=True):
     """
     Preprocesses text to normalize it for tokenization.
     """
@@ -94,8 +102,10 @@ def preprocess_data(text, punctuation=False, lowercase=False):
     text = text.strip()
     if lowercase:
         text = text.lower()
-    if punctuation:
+    if punctuation and keep_quote:
         text = re.sub(r"[^\w\s\']", "", text)
+    elif punctuation and not keep_quote:
+        text = re.sub(r"[^\w\s]", "", text)
     # Remove multiple spaces
     text = re.sub(r"\s+", " ", text)
     # Split text in spaces
@@ -130,7 +140,7 @@ def label_tokens(tokens, terms_position, polarity):
     for token in tokens:
         if token.idx in init_chars and not inside:
             # Starts token labelling
-            bio_map.append(BIO_MAP["B"])
+            bio_map.append("B")
             polarities.append(polarity.pop())
             init_chars.pop(0)
             # If it's an unique token, just label it
@@ -140,21 +150,109 @@ def label_tokens(tokens, terms_position, polarity):
                 inside = True
         elif token.idx + len(token) in end_chars and inside:
             # Finishes inside token labelling
-            bio_map.append(BIO_MAP["I"])
+            bio_map.append("I")
             polarities.append(polarities[-1])
             end_chars.pop(0)
             inside = False
         elif inside:
             # Keeps inside = true and label token as inside
-            bio_map.append(BIO_MAP["I"])
+            bio_map.append("I")
             polarities.append(polarities[-1])
         else:
             # Normal case
-            bio_map.append(BIO_MAP["O"])
+            bio_map.append("O")
             polarities.append(None)
     # Verifies that we extracted all labels
     assert len(init_chars) == 0 and len(end_chars) == 0
-    return bio_map, polarities
+    return {"bio_map": bio_map, "polarities": polarities}
+
+
+def tokenize_nouns(text, spacy_nlp):
+    """
+    Recover only nouns from text.
+    """
+    doc = spacy_nlp(text)
+    nouns_doc = []
+    for token in doc:
+        if token.pos_ in ["NOUN", "PROPN"]:
+            nouns_doc.append(token.text)
+    return nouns_doc
+
+
+def extract_features(dataset, punctuation=False, lowercase=True, keep_quote=True):
+    """
+    Preprocess and extract features from the dataset. Features are tokenized text, lemmatized, POS tags and dependency tags and map.
+    """
+    nlp = spacy.load("en_core_web_sm")
+
+    processed_dataset = []
+    for entry in dataset:
+        # Preprocess text
+        text, labels = preprocess_with_terms_position(
+            entry["text"], entry["terms_position"], punctuation=punctuation, lowercase=lowercase, keep_quote=keep_quote
+        )
+
+        processed_text = nlp(text)
+        # displacy.serve(processed_text, style="dep")
+        tokens = list(processed_text)
+        entry["labels"] = label_tokens(tokens, labels, entry["polarity"])
+        entry.pop("polarity")
+        # Preprocess terms position
+        tokenized_text = []
+        dependency_map = []
+        dependency_ref = []
+        tags_map = []
+        tokens_id = []
+        lemmas = []
+        for n, token in enumerate(tokens):
+            tokenized_text.append(token.text)
+            dependency_map.append(token.dep_)
+            dependency_ref.append(token.head.i)
+            lemmas.append(token.lemma_)
+            tags_map.append(token.pos_)
+            # For mapping tokens to labels and dependency if further processing is needed
+            tokens_id.append(n)
+        features = {}
+        features["tokens"] = tokenized_text
+        features["dependency_map"] = dependency_map
+        features["tags"] = tags_map
+        features["dependency_ref"] = dependency_ref
+        features["tokens_id"] = tokens_id
+        features["lemmas"] = lemmas
+        entry["features"] = features
+        entry["text"] = text
+        entry["terms_position"] = labels
+        processed_dataset.append(entry)
+
+    return processed_dataset
+
+
+def get_lemma_labels(dataset):
+    """
+    Extract lemma labels from the dataset using BIO tags.
+    """
+
+    lemmas = []
+    for entry in dataset:
+        entry_lemmas = []
+        composite_label = []
+        last_value = 10
+
+        for value, lemma in zip(entry["labels"]["bio_map"] + [0], entry["features"]["lemmas"] + ["dumb"]):
+            # Finished joining label
+            if last_value == 2 and value != 2:
+                entry_lemmas.append(" ".join(composite_label))
+            # Single token label
+            elif last_value == 1 and value != 2:
+                entry_lemmas.append(composite_label[0])
+            if value == 1:
+                composite_label = [lemma]
+            elif value == 2:
+                composite_label.append(lemma)
+
+            last_value = value
+        lemmas.append(entry_lemmas)
+    return lemmas
 
 
 if __name__ == "__main__":
