@@ -81,4 +81,37 @@ We need to be consistent with our data-preprocessing/tokenization and with our l
 
 Preprocessing by using only nouns, adjectives, adverbs and verbs tokens (naturally removes punctuation).
 This process is done as follows:
-Automatic Term Extraction algorithms for the Philipp Morris interview challenge 
+**talk a lot about the metrics**
+
+### CRF
+
+With lower case
+              precision    recall  f1-score   support
+
+           B      0.884     0.639     0.742       654
+           I      0.938     0.550     0.694       467
+
+   micro avg      0.904     0.602     0.723      1121
+   macro avg      0.911     0.595     0.718      1121
+weighted avg      0.906     0.602     0.722      1121
+
+without lower case and token all caps and title indication:
+              precision    recall  f1-score   support
+
+           B      0.867     0.636     0.734       654
+           I      0.880     0.549     0.676       466
+
+   micro avg      0.872     0.600     0.711      1120
+   macro avg      0.873     0.593     0.705      1120
+weighted avg      0.872     0.600     0.710      1120
+
+Using lemmas, without lower case and token all caps and title indication:
+           B      0.896     0.656     0.757       654
+           I      0.913     0.588     0.715       466
+
+   micro avg      0.902     0.628     0.740      1120
+   macro avg      0.904     0.622     0.736      1120
+weighted avg      0.903     0.628     0.740      1120
+
+I coul've optimized the hyperparameters, like "algorithm", "min_freq", etc..(other parameters [here](https://sklearn-crfsuite.readthedocs.io/en/latest/api.html)) but for I prefer to move to a newer algorithm.
+
