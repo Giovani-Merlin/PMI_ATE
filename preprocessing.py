@@ -8,6 +8,7 @@ from spacy import displacy
 
 POLARITY_MAP = {"negative": 0, "positive": 1, "neutral": 2, "conflict": 3}
 BIO_MAP = {"O": 0, "B": 1, "I": 2}
+INVERSE_BIO_MAP = {v: k for k, v in BIO_MAP.items()}
 
 
 def parse_laptops_xml(xml_path):
@@ -240,19 +241,44 @@ def get_lemma_labels(dataset):
 
         for value, lemma in zip(entry["labels"]["bio_map"] + [0], entry["features"]["lemmas"] + ["dumb"]):
             # Finished joining label
-            if last_value == 2 and value != 2:
+            if last_value == "I" and value != "I":
                 entry_lemmas.append(" ".join(composite_label))
             # Single token label
-            elif last_value == 1 and value != 2:
+            elif last_value == "B" and value != "I":
                 entry_lemmas.append(composite_label[0])
-            if value == 1:
+            if value == "I":
                 composite_label = [lemma]
-            elif value == 2:
+            elif value == "B":
                 composite_label.append(lemma)
 
             last_value = value
         lemmas.append(entry_lemmas)
     return lemmas
+
+def parse_dependencies(dataset, use_lemmas=False):
+    """
+    Recovers Head word, head word TAG and dependencies.
+    """
+    new_dataset = []
+    for entry in dataset:
+        if use_lemmas:
+            to_use = "lemmas"
+        else:
+            to_use = "tokens"
+        mapped_head = [entry["features"][to_use][i] for i in entry["features"]["dependency_ref"]]
+        mapped_head_tag = [entry["features"]["tags"][i] for i in entry["features"]["dependency_ref"]]
+        # In the case we're using lemmas, our tokens will be the lemmas...
+        entry["features"]["tokens"] = entry["features"][to_use]
+        entry["features"].pop("dependency_ref"), entry["features"].pop("lemmas")
+        entry["dependency_map"] = [
+            dependency
+            for dependency in entry["features"]["dependency_map"]
+            if dependency in ["amod", "dep", "nsubj", "dobj"]
+        ]
+        entry["features"]["head"] = mapped_head
+        entry["features"]["head_tag"] = mapped_head_tag
+        new_dataset.append(entry)
+    return new_dataset
 
 
 if __name__ == "__main__":
