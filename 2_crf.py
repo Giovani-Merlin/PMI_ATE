@@ -1,19 +1,14 @@
 from time import time
-import numpy as np
+from collections import Counter
 import sklearn_crfsuite
-import scipy
-
 from functools import wraps
-from sklearn_crfsuite import scorers
-from sklearn.metrics import make_scorer
 from sklearn import metrics
 
-from sklearn.model_selection import cross_val_score, RandomizedSearchCV
-from utils import get_dataset
-from preprocessing import extract_features
 from sklearn_crfsuite.utils import flatten
+from utils import get_dataset
+from preprocessing import extract_features, parse_dependencies
 
-#
+
 # Crfsuite is only compatible with sklearn < 0.24 - https://github.com/TeamHG-Memex/sklearn-crfsuite/issues/60
 # So, small hacks to make it work with sklearn >= 0.24
 
@@ -71,8 +66,7 @@ def features2crf(features, i):
         "token_pos": token_pos,
         "token_dependency": token_dependency,
         "token": token,
-        "+1:tokeninitialcap": token[0].title(),
-        "+1:wordallcap": token.isupper(),
+
     }
     if i > 0:
         tag, head, head_tag, token_pos, token_dependency, token = _get_features(features, i - 1)
@@ -85,8 +79,7 @@ def features2crf(features, i):
                 "-1:token_pos": token_pos,
                 "-1:token_dependency": token_dependency,
                 "-1:token": token,
-                "+1:tokeninitialcap": token[0].title(),
-                "+1:wordallcap": token.isupper(),
+
             }
         )
     else:
@@ -104,8 +97,7 @@ def features2crf(features, i):
                 "+1:token_pos": token_pos,
                 "+1:token_dependency": token_dependency,
                 "+1:token": token,
-                "+1:tokeninitialcap": token[0].title(),
-                "+1:wordallcap": token.isupper(),
+
             }
         )
     else:
@@ -114,36 +106,10 @@ def features2crf(features, i):
     return features_crf
 
 
-def parse_features(dataset, use_lemmas=False):
-    """
-    Recovers Head word, head word TAG and dependencies.
-    """
-    new_dataset = []
-    for entry in dataset:
-        if use_lemmas:
-            to_use = "lemmas"
-        else:
-            to_use = "tokens"
-        mapped_head = [entry["features"][to_use][i] for i in entry["features"]["dependency_ref"]]
-        mapped_head_tag = [entry["features"]["tags"][i] for i in entry["features"]["dependency_ref"]]
-        # In the case we're using lemmas, our tokens will be the lemmas...
-        entry["features"]["tokens"] = entry["features"][to_use]
-        entry["features"].pop("dependency_ref"), entry["features"].pop("lemmas")
-        entry["dependency_map"] = [
-            dependency
-            for dependency in entry["features"]["dependency_map"]
-            if dependency in ["amod", "dep", "nsubj", "dobj"]
-        ]
-        entry["features"]["head"] = mapped_head
-        entry["features"]["head_tag"] = mapped_head_tag
-        new_dataset.append(entry)
-    return new_dataset
-
-
 ### Train
 raw_train = get_dataset("train")
 train = extract_features(raw_train, lowercase=False)
-parsed_train_dataset = parse_features(train, use_lemmas=True)
+parsed_train_dataset = parse_dependencies(train, use_lemmas=True)
 X_train = [
     [features2crf(entry["features"], i) for i in range(len(entry["features"]["tokens"]))]
     for entry in parsed_train_dataset
@@ -152,7 +118,7 @@ y_train = [entry["labels"]["bio_map"] for entry in train]
 ### Test
 raw_test = get_dataset("test")
 test = extract_features(raw_test, lowercase=False)
-parsed_test_dataset = parse_features(test, use_lemmas=True)
+parsed_test_dataset = parse_dependencies(test, use_lemmas=True)
 X_test = [
     [features2crf(entry["features"], i) for i in range(len(entry["features"]["tokens"]))]
     for entry in parsed_test_dataset
@@ -176,40 +142,6 @@ y_pred = crf.predict(X_test)
 labels = list(crf.classes_)
 labels.remove("O")  # remove 'O' label from evaluation
 print(flat_classification_report(y_test, y_pred, labels=labels, digits=3))
-###
-# define fixed parameters and parameters to search
-crf = sklearn_crfsuite.CRF(algorithm="lbfgs", max_iterations=100, all_possible_transitions=True)
-crf.model_filename = None
-crf.keep_tempfiles = None
-params_space = {
-    "c1": scipy.stats.expon(scale=0.5),
-    "c2": scipy.stats.expon(scale=0.05),
-}
-
-# use the same metric for evaluation
-f1_scorer = make_scorer(flat_f1_score, average="weighted", labels=labels)
-print("Optimization started...")
-t0 = time()
-# search
-rs = RandomizedSearchCV(
-    crf,
-    params_space,
-    cv=3,
-    verbose=1,
-    n_jobs=-1,
-    n_iter=50,
-    scoring=f1_scorer,
-)
-
-
-rs.fit(X_train, y_train)
-print(f"Optimization completed in {(time() - t0) / 1000}")
-crf = rs.best_estimator_
-y_pred = crf.predict(X_test)
-print(
-    flat_classification_report(y_test, y_pred, labels=labels, digits=3),
-)
-from collections import Counter
 
 
 def print_transitions(trans_features):
@@ -220,8 +152,6 @@ def print_transitions(trans_features):
 print("Top likely transitions:")
 print_transitions(Counter(crf.transition_features_).most_common(20))
 
-print("\nTop unlikely transitions:")
-print_transitions(Counter(crf.transition_features_).most_common()[-20:])
 
 
 def print_state_features(state_features):
