@@ -1,119 +1,164 @@
-import pandas as pd
 import numpy as np
 from sklearn import metrics
-from sklearn.multiclass import OneVsRestClassifier
 from sklearn.svm import LinearSVC
 from sklearn.naive_bayes import MultinomialNB
-from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.linear_model import LogisticRegression
 
 from utils import get_dataset
-from preprocessing import extract_features, get_lemma_labels
+from preprocessing import extract_features, BIO_MAP,INVERSE_BIO_MAP, parse_dependencies
 
 # Future warning for coef_, says to use importance_getter but this function doesn't exists
 import warnings
-
+from sklearn.feature_extraction import DictVectorizer
 warnings.filterwarnings("ignore")
 
-
+SEED = 0
 def filter_features(dataset):
     """
     POSTag filtering of noun, adjective, verb and adverb.
     """
     filtered_dataset = []
+    label_tags = []
     for entry in dataset:
         valid_tokens = []
         for n, tag in enumerate(entry["features"]["tags"]):
             if tag in ["NOUN", "ADJ", "VERB", "ADV"]:
                 valid_tokens.append(n)
+            if entry['labels']['bio_map'][n]!='O':
+                label_tags.append(entry['features']['tags'][n])
+
+
         for feature_name, value in entry["features"].items():
             entry["features"][feature_name] = [value[i] for i in valid_tokens]
         for label_name, value in entry["labels"].items():
             entry["labels"][label_name] = [value[i] for i in valid_tokens]
         filtered_dataset.append(entry)
-    return filtered_dataset
+    return filtered_dataset, label_tags
 
 
 raw_train = get_dataset("train")
-train = extract_features(raw_train)
-train = filter_features(train)
+train = extract_features(raw_train)#, punctuation=True,lowercase=True,keep_quote=False)
+train = parse_dependencies(train, use_lemmas=False)
+# Filter labels too
+#train, label_tags = filter_features(train)
 raw_test = get_dataset("test")
-test = extract_features(raw_test)
-test = filter_features(test)
+test = extract_features(raw_test)#, punctuation=True,lowercase=True,keep_quote=False)
+test = parse_dependencies(test, use_lemmas=False)
+#test, label_tags = filter_features(test)
 
-# Use lemmatized tokens
+def extract_train_dataset(dataset):
+    x_train = []
+    y_train = []
+    for n, entry in enumerate(dataset):
+        for token_n in range(len(entry['features']['tokens'])):
+            row = {}
+            features = entry['features']
+            row["tag"] = features['tags'][token_n]
+            row["token"] = features['tokens'][token_n]
+            row["dependency"] = features['dependency_map'][token_n]
+            row["head_tag"] = features['head_tag'][token_n]
+            #row['id'] = entry['id']
+            y_train.append(BIO_MAP[entry["labels"]['bio_map'][token_n]])
+            #row['sentence'] = n
+            x_train.append(row)
+    return x_train, y_train
 
-labels_lemmas_train = get_lemma_labels(train)
-labels_train = list(set([entry for sub_list in labels_lemmas_train for entry in sub_list]))
-labels_lemmas_test = get_lemma_labels(test)
-labels_test = set([entry for sub_list in labels_lemmas_test for entry in sub_list])
-total_test = len(labels_test)
-common_labels = labels_test.intersection(labels_train)
-labels_test = list(labels_test)
-max_accuracy = len(common_labels) / total_test
-print("Max accuracy : ", max_accuracy)
+# Create features
+v = DictVectorizer(sparse=True)
+x_train, y_train = extract_train_dataset(train)
+x_test, y_test = extract_train_dataset(test)
+X_train_vec = v.fit_transform(x_train)
+X_test_vec = v.transform(x_test)
+y_test = np.array(y_test)
+# Train models
+nb_classif = MultinomialNB().fit(X_train_vec, y_train)
+y_pred = nb_classif.predict(X_test_vec)
+print("NB report")
+print(metrics.classification_report(y_test, y_pred, labels=[1,2]))
+#
+lin_svc = LinearSVC(class_weight="balanced",random_state=SEED).fit(X_train_vec, y_train)
+y_pred = lin_svc.predict(X_test_vec)
+print("Linear SVC report")
+print(metrics.classification_report(y_test, y_pred, labels=[1,2]))
+#
+decision_tree = DecisionTreeClassifier(criterion="entropy", splitter="best", max_depth=30, class_weight='balanced',random_state=SEED).fit(X_train_vec,y_train)
+y_pred = decision_tree.predict(X_test_vec)
+print("Decision Tree report")
+print(metrics.classification_report(y_test, y_pred, labels=[1,2]))
+#
+logistic_regression = LogisticRegression(class_weight="balanced",random_state=SEED,C=1000.0).fit(X_train_vec, y_train)
+y_pred = logistic_regression.predict(X_test_vec)
+print("Logistic Regression report")
+print(metrics.classification_report(y_test, y_pred, labels=[1,2]))
 
-# All the preprocessing steps are already done  (by filter_features)
 
-one_hot_labels = []
-# Extract one_hot train
-for entry, label_train in zip(train, labels_lemmas_train):
-    row_data = {key: 0 for key in labels_train}
-    for label in label_train:
-        row_data[label] = 1
-    row_data["X"] = entry["features"]["lemmas"]
-    one_hot_labels.append(row_data)
-X_df_train = pd.DataFrame(one_hot_labels)
-X_train = X_df_train["X"]
-y_train = X_df_train.drop(columns="X", axis=1)
-# Extract one_hot test, ignoring labels that we don't have in train
-one_hot_labels = []
-for entry, labels in zip(test, labels_lemmas_test):
-    row_data = {key: 0 for key in labels_train}
-    for label in labels:
-        if label in labels_train:
-            row_data[label] = 1
-    row_data["X"] = entry["features"]["lemmas"]
-    one_hot_labels.append(row_data)
-X_test_df = pd.DataFrame(one_hot_labels).fillna(0)
-X_test = X_test_df["X"]
-y_test = X_test_df.drop(columns="X", axis=1)
-# Vectorize text using counts
-y_train = np.asarray(y_train, dtype=np.int64)
-y_test = np.asarray(y_test, dtype=np.int64)
-vect = CountVectorizer(max_df=0.7, min_df=1, analyzer=lambda x: x, preprocessor=lambda x: x)
-X_train_cnt = vect.fit_transform(X_train)
-X_test_cnt = vect.transform(X_test)
-# Create different models. These are multi-label models
+# Importance analysis
+def get_importance_str(coefs, feature_names, important_factors_idx):
+    top_features_strs = [f"{feature_names[idx]}:{coefs[idx]:0.3f}" for idx in important_factors_idx[:5] if coefs[idx] > 0]
+    top_neg_features_strs = [f"{feature_names[idx]}:{coefs[idx]:0.3f}" for idx in important_factors_idx[::-1][:5] if coefs[idx] < 0]
+    return top_features_strs+top_neg_features_strs
 
-nb_classif = OneVsRestClassifier(MultinomialNB()).fit(X_train_cnt, y_train)
-C = 1.0
-lin_svc = OneVsRestClassifier(LinearSVC(C=C)).fit(X_train_cnt, y_train)
-# Predict the test data using classifiers, no grid search as it's just a weak example.
+feature_names = np.array(v.get_feature_names_out())
+for n , coefs in enumerate(lin_svc.coef_):
+    print("###############################")
+    print(f"Most important factors do determine that a token is of type {INVERSE_BIO_MAP[n]}")
+    #
+    tokens_idx = np.array([n for n, tag in enumerate(feature_names) if tag.startswith("token")])
+    tokens_coefs = coefs[tokens_idx]
+    important_factors_idx = tokens_coefs.argsort()[::-1]
+    for feature_str in get_importance_str(tokens_coefs, feature_names, important_factors_idx):
+        print(feature_str+"\n")
+    #
+    dependencies_idx = np.array([n for n, dependency in enumerate(feature_names) if dependency.startswith("dependency")])
+    dependencies_coefs = coefs[dependencies_idx]
+    important_factors_idx = dependencies_coefs.argsort()[::-1]
+    for feature_str in get_importance_str(dependencies_coefs[dependencies_idx], feature_names, important_factors_idx):
+        print(feature_str+"\n")
+    #
+    head_tags_idx = np.array([n for n, head_tag in enumerate(feature_names) if head_tag.startswith("head_tag")])
+    head_tags_coefs = coefs[head_tags_idx]
+    important_factors_idx = head_tags_coefs.argsort()[::-1]
+    for feature_str in get_importance_str(head_tags_coefs, feature_names[head_tags_idx], important_factors_idx):
+        print(feature_str+"\n")
+    #
+    tags_idx = np.array([n for n, tag in enumerate(feature_names) if tag.startswith("tag")])
+    tags_coefs = coefs[tags_idx]
+    important_factors_idx = tags_coefs.argsort()[::-1]
+    for feature_str in get_importance_str(tags_coefs, feature_names[tags_idx], important_factors_idx):
+        print(feature_str+"\n")
 
-y_pred_class = nb_classif.predict(X_test_cnt)
-print(" Accuracy in terms that exist in train dataset for Naive Bayes classifier")
-print(metrics.accuracy_score(y_test, y_pred_class))
-print(" True accuracy for Naive Bayes classifier")
-print(metrics.accuracy_score(y_test, y_pred_class) * max_accuracy)
+# More details about the best model
+#
+y_pred = lin_svc.predict(X_test_vec)
+print("Linear SVC report")
+print(metrics.classification_report(y_test, y_pred))
+# Partial match and full match
+tagged_idx = y_test>0
+y_test_tagged = y_test[tagged_idx]
+y_pred = y_pred[tagged_idx]
+mentions_gold = []
+mentions_pred = []
+mention_pred = [y_pred[0]]
+mention_gold = [1]
+# First, extract all the mentions results
+for pred, gold in zip(y_pred, y_test_tagged):
+    if gold == 1:
+        mentions_gold.append(mention_gold)
+        mentions_pred.append(mention_pred)
+        mention_gold = [gold]
+        mention_pred = [pred]
+    else:
+        mention_gold.append(gold)
+        mention_pred.append(pred)
 
-y_pred_class_lin_svc = lin_svc.predict(X_test_cnt)
-print(" Accuracy in terms that exist in train dataset for Linear Support Vector Classification")
-print(metrics.accuracy_score(y_test, y_pred_class_lin_svc))
-print(" True accuracy for Linear Support Vector Classification")
-print(metrics.accuracy_score(y_test, y_pred_class_lin_svc) * max_accuracy)
-print(" Recall (per term) for Linear Support Vector Classification")
-print(metrics.recall_score(y_test, y_pred_class_lin_svc, average="micro"))
-print("True Recall for Linear Support Vector Classification")
-print(metrics.recall_score(y_test, y_pred_class_lin_svc, average="micro") * max_accuracy)
-# Importance linear svc
-# For example, for the labels "lid", "service" and "window operating system" we have that
-# following tokens are the most important for identifying these labels:
-features_name = np.array(vect.get_feature_names_out())
-for feature_to_analyse in ["lid", "service", "window operating system"]:
-    label = labels_train.index(feature_to_analyse)
-    top_importance_idx = lin_svc.coef_[label].argsort()[::-1]
-    top_features = [features_name[idx] for idx in top_importance_idx[:5] if lin_svc.coef_[label][idx] > 0]
-    top_neg_features = [features_name[idx] for idx in top_importance_idx[::-1][:5] if lin_svc.coef_[label][idx] < 0]
-    print("Top contributing tokens  {}".format(feature_to_analyse))
-    print(top_features, "\n")
-    print("Top negatin token {}".format(top_neg_features))
+# Using only the mentions, extract the full and partial match results
+full_match = 0
+partial_match = 0
+for mention_gold, mention_pred in zip(mentions_gold, mentions_pred):
+    if mention_gold == mention_pred:
+        full_match += 1
+    if sum(mention_pred) > 0:
+        partial_match +=1
+print(f"Full match score: {full_match}/{len(mentions_gold)} - {full_match/len(mentions_gold):0.3f}")
+print(f"Partial match score: {partial_match}/{len(mentions_gold)} - {partial_match/len(mentions_gold):0.3f}")
