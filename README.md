@@ -59,3 +59,7 @@ And first lines of the dataset files are:
     "polarity": []
 }
 ```
+
+## Report
+
+All project/algorithms explanation in the report_pmi.pdf.
